@@ -1,0 +1,35 @@
+# API Keys & Configuration
+config.yaml
+acr-config.yaml
+
+# Generated reports
+review_report_*.md
+review_report_*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/

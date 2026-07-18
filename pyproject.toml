@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-code-reviewer"
+version = "0.1.0"
+description = "Multi-agent collaborative code testing and architecture review system"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0.0",
+    "gitpython>=3.1.0",
+    "pyyaml>=6.0",
+    "rich>=13.0.0",
+    "click>=8.0.0",
+    "pydantic>=2.0.0",
+]
+
+[project.scripts]
+acr = "agent_code_reviewer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agent_code_reviewer*"]
