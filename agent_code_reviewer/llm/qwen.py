@@ -19,6 +19,7 @@ class QwenLLM(BaseLLM):
         Args:
             config: LLM configuration with api_key, base_url, and model.
         """
+        super().__init__()
         self.config = config
         self.client = OpenAI(
             api_key=config.api_key,
@@ -48,6 +49,12 @@ class QwenLLM(BaseLLM):
             ],
             temperature=temperature,
         )
+
+        # Track token usage from response
+        if response.usage:
+            self.total_prompt_tokens += response.usage.prompt_tokens
+            self.total_completion_tokens += response.usage.completion_tokens
+
         return response.choices[0].message.content
 
     def chat_json(self, system_prompt: str, user_prompt: str, temperature: float = 0.1) -> dict:

@@ -13,7 +13,9 @@ from rich.markdown import Markdown
 from agent_code_reviewer import __version__
 from agent_code_reviewer.config import Config
 from agent_code_reviewer.orchestrator.director import Director
+from agent_code_reviewer.integrations.github import GitHubLoader
 from agent_code_reviewer.report.formatter import save_report
+from agent_code_reviewer.report import store as report_store
 
 
 try:
@@ -35,7 +37,7 @@ def main():
 
 
 @main.command()
-@click.argument("repo_url")
+@click.argument("target")
 @click.argument("requirement")
 @click.option("--config", "config_path", default=None, help="配置文件路径")
 @click.option("--output-dir", "-o", default=".", help="报告输出目录")
@@ -45,10 +47,15 @@ def main():
     default="both",
     help="报告输出格式",
 )
-def review(repo_url: str, requirement: str, config_path: str, output_dir: str, output_format: str):
-    """对 GitHub 仓库执行代码审查
+@click.option(
+    "--local", "is_local", is_flag=True, default=False,
+    help="强制以本地目录模式运行（默认自动检测）",
+)
+def review(target: str, requirement: str, config_path: str, output_dir: str, output_format: str, is_local: bool):
+    """对代码仓库执行代码审查
 
-    REPO_URL     GitHub 仓库地址，例如 https://github.com/user/repo
+    TARGET  可以是 GitHub 仓库 URL（例如 https://github.com/user/repo）
+            也可以是本地目录路径（例如 ./my-project）
     REQUIREMENT  测试需求描述，例如 "请帮我测试用户注册模块"
     """
     # Banner
@@ -61,7 +68,7 @@ def review(repo_url: str, requirement: str, config_path: str, output_dir: str, o
     try:
         config = Config.load(config_path)
     except Exception as e:
-        console.print(f"[red]❌ 配置加载失败: {e}[/red]")
+        console.print(f"[red]配置加载失败: {e}[/red]")
         sys.exit(1)
 
     # Override output config from CLI args
@@ -70,16 +77,23 @@ def review(repo_url: str, requirement: str, config_path: str, output_dir: str, o
 
     # Validate API key
     if not config.llm.api_key:
-        console.print("[red]❌ 未配置 API Key！[/red]")
+        console.print("[red]未配置 API Key！[/red]")
         console.print("请通过以下方式之一配置：")
         console.print("  1. 设置环境变量: export DASHSCOPE_API_KEY=your_key")
         console.print("  2. 创建 config.yaml 配置文件（运行 [cyan]acr init[/cyan] 生成模板）")
         sys.exit(1)
 
+    # Auto-detect: local path or GitHub URL
+    if not is_local:
+        is_local = GitHubLoader.is_local_path(target)
+
+    source_type = "本地目录" if is_local else "GitHub 仓库"
+    source_display = target if not is_local else Path(target).resolve()
+
     # Display info
-    console.print(f"\n[bold]📦 仓库:[/bold] {repo_url}")
-    console.print(f"[bold]📝 需求:[/bold] {requirement}")
-    console.print(f"[bold]🤖 模型:[/bold] {config.llm.model} ({config.llm.provider})")
+    console.print(f"\n[bold]{source_type}:[/bold] {source_display}")
+    console.print(f"[bold]需求:[/bold] {requirement}")
+    console.print(f"[bold]模型:[/bold] {config.llm.model} ({config.llm.provider})")
     console.print()
 
     # Initialize director
@@ -87,13 +101,13 @@ def review(repo_url: str, requirement: str, config_path: str, output_dir: str, o
 
     # Run pipeline with progress display
     stages = {
-        "clone": "📥 克隆仓库",
-        "requirement": "📋 需求分析",
-        "code_reading": "🔍 代码阅读",
-        "testing": "🧪 测试生成",
-        "review": "🛡️ 安全审查",
-        "cleanup": "🧹 清理资源",
-        "done": "✅ 完成",
+        "clone": "加载代码" if is_local else "克隆仓库",
+        "requirement": "需求分析",
+        "code_reading": "代码阅读",
+        "testing": "测试生成",
+        "review": "安全审查",
+        "cleanup": "清理资源",
+        "done": "完成",
     }
 
     with Progress(
@@ -111,21 +125,22 @@ def review(repo_url: str, requirement: str, config_path: str, output_dir: str, o
         try:
             report = director.run(
                 user_requirement=requirement,
-                repo_url=repo_url,
+                repo_url=target,
                 progress_callback=on_progress,
+                is_local=is_local,
             )
         except Exception as e:
-            console.print(f"\n[red]❌ 审查过程出错: {e}[/red]")
+            console.print(f"\n[red]审查过程出错: {e}[/red]")
             sys.exit(1)
 
     # Save report
-    console.print("\n[bold]💾 保存报告...[/bold]")
+    console.print("\n[bold]保存报告...[/bold]")
     try:
         saved_files = save_report(report, config.output.directory, config.output.format)
         for f in saved_files:
-            console.print(f"  [green]✓[/green] {f}")
+            console.print(f"  [green]v[/green] {f}")
     except Exception as e:
-        console.print(f"[red]❌ 报告保存失败: {e}[/red]")
+        console.print(f"[red]报告保存失败: {e}[/red]")
         sys.exit(1)
 
     # Print summary
@@ -163,8 +178,75 @@ def init():
         example_content = _get_default_config()
 
     target.write_text(example_content, encoding='utf-8')
-    console.print(f"[green]✅ 已创建 config.yaml[/green]")
+    console.print(f"[green]已创建 config.yaml[/green]")
     console.print("请编辑配置文件，填入你的 API Key。")
+
+
+@main.command()
+@click.option("--limit", "-n", default=10, help="显示最近 N 条记录")
+def history(limit: int):
+    """查看历史审查报告列表"""
+    reports = report_store.list_reports(limit=limit)
+
+    if not reports:
+        console.print("[yellow]暂无历史审查记录。[/yellow]")
+        return
+
+    table = Table(title=f"历史审查记录（最近 {len(reports)} 条）", show_header=True, header_style="bold cyan")
+    table.add_column("ID", style="bold", width=4)
+    table.add_column("时间", width=20)
+    table.add_column("目标", width=40)
+    table.add_column("需求", width=40)
+    table.add_column("Token", width=10)
+
+    for r in reports:
+        tokens = r.get("token_usage", {})
+        total_tokens = tokens.get("total_tokens", 0)
+        total_str = f"{total_tokens:,}" if total_tokens else "-"
+        table.add_row(
+            str(r.get("id", "")),
+            r.get("timestamp", ""),
+            r.get("repo", "")[:38],
+            r.get("requirement", "")[:38],
+            total_str,
+        )
+
+    console.print(table)
+    console.print("\n使用 [bold]acr show <ID>[/bold] 查看详细信息。")
+
+
+@main.command()
+@click.argument("report_id", type=int)
+def show(report_id: int):
+    """查看指定 ID 的历史审查报告详情"""
+    entry = report_store.get_report(report_id)
+
+    if not entry:
+        console.print(f"[red]未找到 ID 为 {report_id} 的报告。[/red]")
+        console.print("使用 [bold]acr history[/bold] 查看可用的报告列表。")
+        return
+
+    console.print(Panel.fit(
+        f"[bold cyan]报告 #{entry['id']}[/bold cyan]",
+        subtitle=entry.get("timestamp", ""),
+    ))
+    console.print(f"[bold]目标:[/bold] {entry.get('repo', '')}")
+    console.print(f"[bold]需求:[/bold] {entry.get('requirement', '')}")
+
+    tokens = entry.get("token_usage", {})
+    if tokens.get("total_tokens"):
+        console.print(
+            f"[bold]Token:[/bold] 输入 {tokens['prompt_tokens']:,} | "
+            f"输出 {tokens['completion_tokens']:,} | "
+            f"总计 {tokens['total_tokens']:,}"
+        )
+
+    console.print(f"\n[bold]生成的文件:[/bold]")
+    for f in entry.get("files", []):
+        console.print(f"  [green]*[/green] {f}")
+
+    console.print("\n使用以下命令查看报告内容：")
+    console.print(f"  [bold]cat {entry['files'][0] if entry.get('files') else ''}[/bold]")
 
 
 def _print_summary(report) -> None:
@@ -203,10 +285,21 @@ def _print_summary(report) -> None:
     # Security review summary
     sr = report.security_review
     table.add_row(
-        "🛡️ 安全审查",
+        "安全审查",
         f"高危漏洞: {len(sr.high_risks)} 个 | "
         f"代码异味: {len(sr.code_smells)} 个",
     )
+
+    # Token usage
+    tokens = report.token_usage or {}
+    total = tokens.get("total_tokens", 0)
+    if total:
+        table.add_row(
+            "Token 用量",
+            f"输入: {tokens.get('prompt_tokens', 0):,} | "
+            f"输出: {tokens.get('completion_tokens', 0):,} | "
+            f"总计: {total:,}",
+        )
 
     console.print(table)
 

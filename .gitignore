@@ -31,5 +31,9 @@ env/
 .DS_Store
 Thumbs.db
 
+# Reasonix workspace config
+.reasonix/
+reasonix.toml
+
 # Git
 .git/

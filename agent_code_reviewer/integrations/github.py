@@ -17,6 +17,17 @@ class GitHubLoader:
     Supports context manager protocol for automatic cleanup.
     """
 
+    @staticmethod
+    def is_local_path(path_str: str) -> bool:
+        """Check if the given string is a local directory path."""
+        p = Path(path_str)
+        return p.exists() and p.is_dir()
+
+    @staticmethod
+    def is_github_url(url: str) -> bool:
+        """Check if the given string is a GitHub URL."""
+        return url.startswith("https://github.com/") or url.startswith("git@github.com:")
+
     def __init__(self, config: AnalysisConfig):
         """Initialize the GitHub loader.
 
@@ -230,6 +241,21 @@ class GitHubLoader:
                     counts[ext] = counts.get(ext, 0) + 1
         except PermissionError:
             pass
+
+    def load_local(self, path: str) -> Path:
+        """Load a local directory directly (no clone).
+
+        Args:
+            path: Local filesystem path to a project directory.
+
+        Returns:
+            Path to the local directory.
+        """
+        self._repo_path = Path(path).resolve()
+        self._temp_dir = None
+        if not self._repo_path.is_dir():
+            raise NotADirectoryError(f"本地路径不是有效目录: {path}")
+        return self._repo_path
 
     def cleanup(self) -> None:
         """Remove the temporary clone directory."""

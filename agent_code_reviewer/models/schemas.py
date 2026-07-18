@@ -126,6 +126,7 @@ class ReviewReport:
     code_context: CodeContext = None
     test_script: TestScript = None
     security_review: SecurityReview = None
+    token_usage: dict = None
     generated_at: str = ""
 
     def __post_init__(self):
@@ -137,6 +138,8 @@ class ReviewReport:
             self.test_script = TestScript()
         if self.security_review is None:
             self.security_review = SecurityReview()
+        if self.token_usage is None:
+            self.token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         if not self.generated_at:
             self.generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -162,6 +165,7 @@ class ReviewReport:
         return {
             "repo_url": self.repo_url,
             "generated_at": self.generated_at,
+            "token_usage": self.token_usage,
             "requirement": {
                 "test_objective": self.requirement.test_objective,
                 "core_test_points": self.requirement.core_test_points,

@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from agent_code_reviewer.models.schemas import ReviewReport
+from agent_code_reviewer.report.store import register_report
 
 
 def save_report(
@@ -39,5 +40,16 @@ def save_report(
         json_content = json.dumps(report.to_dict(), ensure_ascii=False, indent=2)
         json_path.write_text(json_content, encoding='utf-8')
         saved_files.append(str(json_path))
+
+    # Register in persistent index
+    try:
+        register_report(
+            report_paths=saved_files,
+            repo_url=report.repo_url,
+            requirement=report.requirement.test_objective,
+            token_usage=report.token_usage,
+        )
+    except Exception:
+        pass  # Indexing is best-effort
 
     return saved_files

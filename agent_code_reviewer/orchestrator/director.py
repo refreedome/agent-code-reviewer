@@ -47,13 +47,15 @@ class Director:
         user_requirement: str,
         repo_url: str,
         progress_callback: Optional[Callable[[str, str], None]] = None,
+        is_local: bool = False,
     ) -> ReviewReport:
         """Execute the full multi-agent code review pipeline.
 
         Args:
             user_requirement: Natural language description of what to test/review.
-            repo_url: GitHub repository URL to analyze.
+            repo_url: GitHub repository URL or local directory path to analyze.
             progress_callback: Optional callback(stage, message) for progress updates.
+            is_local: If True, repo_url is treated as a local filesystem path.
 
         Returns:
             Comprehensive ReviewReport with all agent outputs.
@@ -70,12 +72,17 @@ class Director:
         # Initialize report
         report = ReviewReport(repo_url=repo_url)
 
-        # Stage 0: Clone repository
-        notify("clone", "正在克隆代码仓库...")
+        # Stage 0: Load repository (clone or local)
+        source_label = "本地目录" if is_local else "GitHub 仓库"
+        notify("clone", f"正在加载{source_label}...")
         loader = GitHubLoader(self.config.analysis)
         try:
-            loader.clone_repo(repo_url)
-            notify("clone", "代码仓库克隆完成")
+            if is_local:
+                loader.load_local(repo_url)
+                notify("clone", f"本地目录加载完成: {repo_url}")
+            else:
+                loader.clone_repo(repo_url)
+                notify("clone", "GitHub 仓库克隆完成")
 
             # Get project info
             project_tree = loader.get_project_tree()
@@ -157,7 +164,10 @@ class Director:
             loader.cleanup()
             notify("cleanup", "清理完成")
 
-        notify("done", "✅ 综合报告生成完毕")
+        notify("done", "综合报告生成完毕")
+        # Collect token usage
+        report.token_usage = self.llm.get_token_summary()
+        logger.info(f"Token usage: {report.token_usage}")
         return report
 
     def _limit_code_files(self, code_files: dict, max_chars: int = 80000) -> dict:
