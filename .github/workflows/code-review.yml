@@ -1,0 +1,90 @@
+# Agent Code Reviewer - GitHub Actions Workflow
+# 在 PR 创建或更新时自动触发代码审查
+#
+# 使用方法：
+# 1. 在 GitHub 仓库 Settings > Secrets and variables > Actions 中添加：
+#    - DASHSCOPE_API_KEY: 你的阿里云 DashScope API Key
+# 2. 提交此文件到仓库的 .github/workflows/ 目录
+# 3. 创建 PR 时会自动触发审查，结果以 PR Comment 形式展示
+
+name: Agent Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  # 也可以手动触发
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR 编号'
+        required: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # 限制并发，避免多个 PR 同时审查消耗过多 Token
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # 检出 PR 的合并提交，让工具能分析完整代码
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Agent Code Reviewer
+        run: |
+          pip install --upgrade pip
+          pip install git+https://github.com/${{ github.repository }}.git
+
+      - name: Run code review
+        env:
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+        run: |
+          PR_BODY="${{ github.event.pull_request.body }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          REQUIREMENT="审查 PR #${{ github.event.pull_request.number }}: ${PR_TITLE}
+
+          ${PR_BODY}"
+
+          acr review "${{ github.event.pull_request.head.repo.clone_url }}" \
+            "$REQUIREMENT" \
+            --output-dir ./review-output \
+            --format markdown
+
+      - name: Post review comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const files = fs.readdirSync('./review-output');
+            const mdFile = files.find(f => f.endsWith('.md'));
+
+            if (mdFile) {
+              const report = fs.readFileSync(`./review-output/${mdFile}`, 'utf-8');
+              const summary = report.length > 60000
+                ? report.substring(0, 60000) + '\n\n...（报告过长已截断）'
+                : report;
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `## 🤖 Agent Code Review 完成\n\n${summary}`
+              });
+            }
+
+      - name: Upload report as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-report-${{ github.event.pull_request.number }}
+          path: ./review-output/

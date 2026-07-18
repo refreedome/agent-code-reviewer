@@ -1,5 +1,6 @@
 """Tester agent - generates test scripts and test cases."""
 from agent_code_reviewer.agents.base import BaseAgent
+from agent_code_reviewer.knowledge.store import get_rag_context
 
 
 class Tester(BaseAgent):
@@ -75,12 +76,17 @@ class Tester(BaseAgent):
             input_data: Dictionary with keys:
                 - requirement (dict): Structured test requirement
                 - code_context (dict): Extracted code context
+                - syntax_feedback (str, optional): Previous sandbox errors for retry
 
         Returns:
             Dictionary matching TestScript schema.
         """
         requirement = input_data.get("requirement", {})
         code_context = input_data.get("code_context", {})
+        syntax_feedback = input_data.get("syntax_feedback", "")
+
+        # RAG: retrieve relevant team specs and examples
+        rag_context = get_rag_context(requirement.get("test_objective", ""))
 
         # Format requirement for prompt
         req_text = f"测试目标: {requirement.get('test_objective', '')}\n\n核心测试点:\n"
@@ -120,6 +126,8 @@ class Tester(BaseAgent):
 ## 代码上下文
 {code_text}
 
+{f"## 知识参考（团队规范与历史用例）\n{rag_context}\n" if rag_context else ""}
+{f"## 上次运行错误反馈（请修复这些问题）\n{syntax_feedback}\n" if syntax_feedback else ""}
 请按照系统提示中的 JSON 格式输出测试脚本。确保代码完整可运行。"""
 
         result = self.llm.chat_json(self.system_prompt, user_prompt, temperature=0.3)

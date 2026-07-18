@@ -16,6 +16,7 @@ from agent_code_reviewer.orchestrator.director import Director
 from agent_code_reviewer.integrations.github import GitHubLoader
 from agent_code_reviewer.report.formatter import save_report
 from agent_code_reviewer.report import store as report_store
+from agent_code_reviewer.knowledge import store as knowledge_store
 
 
 try:
@@ -105,6 +106,7 @@ def review(target: str, requirement: str, config_path: str, output_dir: str, out
         "requirement": "需求分析",
         "code_reading": "代码阅读",
         "testing": "测试生成",
+        "testing_result": "沙盒验证",
         "review": "安全审查",
         "cleanup": "清理资源",
         "done": "完成",
@@ -249,6 +251,109 @@ def show(report_id: int):
     console.print(f"  [bold]cat {entry['files'][0] if entry.get('files') else ''}[/bold]")
 
 
+# ---- Knowledge Base Commands ---- #
+
+@main.group()
+def knowledge():
+    """管理团队知识库（RAG 规范注入 + 知识萃取）
+
+    添加编码规范、优秀测试用例和人工修正记录，
+    让 Agent 生成的测试代码"自带团队基因"。
+    """
+    pass
+
+
+@knowledge.command("add-spec")
+@click.option("--tag", "-t", required=True, help="规范标签，如 naming/assertion/fixture")
+@click.option("--content", "-c", required=True, help="规范内容")
+def add_spec(tag: str, content: str):
+    """添加团队编码规范，供 Agent 检索注入"""
+    knowledge_store.add_spec(tag, content)
+    console.print(f"[green]已添加规范 [{tag}]: {content[:60]}...[/green]")
+
+
+@knowledge.command("list-specs")
+def list_specs():
+    """列出所有团队编码规范"""
+    specs = knowledge_store.list_specs()
+    if not specs:
+        console.print("[yellow]暂无团队规范。使用 acr knowledge add-spec 添加。[/yellow]")
+        return
+    table = Table(title=f"团队编码规范（共 {len(specs)} 条）", show_header=True)
+    table.add_column("ID", width=4)
+    table.add_column("标签", width=12)
+    table.add_column("内容", width=80)
+    for s in specs:
+        table.add_row(str(s.get("id", "")), s.get("tag", ""), s.get("content", "")[:76])
+    console.print(table)
+
+
+@knowledge.command("add-example")
+@click.option("--title", "-t", required=True, help="用例标题")
+@click.option("--code", "-c", required=True, help="测试代码")
+@click.option("--tags", "-T", default="", help="标签（逗号分隔）")
+def add_example(title: str, code: str, tags: str):
+    """添加高质量测试用例作为 Few-shot 示例"""
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+    knowledge_store.add_example(title, code, tag_list)
+    console.print(f"[green]已添加示例: {title}[/green]")
+
+
+@knowledge.command("add-correction")
+@click.option("--error", "-e", required=True, help="原始错误代码")
+@click.option("--fixed", "-f", required=True, help="修正后的代码")
+@click.option("--info", "-i", default="", help="错误描述")
+def add_correction(error: str, fixed: str, info: str):
+    """记录人工修正对，用于持续学习"""
+    knowledge_store.record_correction(error, fixed, info)
+    console.print(f"[green]已记录修正: {info[:60]}...[/green]")
+
+
+# ---- Webhook Command ---- #
+
+@main.command()
+@click.option("--host", default="0.0.0.0", help="监听地址")
+@click.option("--port", "-p", default=8080, help="监听端口", type=int)
+@click.option("--secret", "-s", default="", help="GitHub Webhook Secret")
+@click.option("--config", "config_path", default=None, help="配置文件路径")
+def webhook(host: str, port: int, secret: str, config_path: str):
+    """启动 GitHub Webhook 服务器，监听 PR 事件自动审查
+
+    当 GitHub 仓库收到 Pull Request 时，自动触发代码审查流水线。
+    需要在 GitHub 仓库 Settings > Webhooks 中配置指向此服务器的地址。
+    """
+    try:
+        config = Config.load(config_path)
+    except Exception as e:
+        console.print(f"[red]配置加载失败: {e}[/red]")
+        sys.exit(1)
+
+    if not config.llm.api_key:
+        console.print("[red]未配置 API Key！[/red]")
+        sys.exit(1)
+
+    console.print(Panel.fit(
+        f"[bold cyan]Webhook Server[/bold cyan]",
+        subtitle=f"监听 {host}:{port}",
+    ))
+    console.print(f"[bold]配置:[/bold] 在 GitHub 仓库 Settings > Webhooks 中添加:")
+    console.print(f"  Payload URL: http://YOUR_SERVER_IP:{port}/")
+    console.print(f"  Content type: application/json")
+    console.print(f"  Secret: {'已设置' if secret else '未设置（不推荐）'}")
+    console.print(f"  Events: Pull requests")
+    console.print()
+    console.print("[yellow]按 Ctrl+C 停止服务器[/yellow]")
+
+    try:
+        from agent_code_reviewer.webhook.server import start_webhook_server
+        start_webhook_server(host=host, port=port, secret=secret, config=config)
+    except KeyboardInterrupt:
+        console.print("\n[green]服务器已停止。[/green]")
+    except Exception as e:
+        console.print(f"[red]服务器启动失败: {e}[/red]")
+        sys.exit(1)
+
+
 def _print_summary(report) -> None:
     """Print a summary table of the review report."""
     table = Table(title="📊 审查报告摘要", show_header=True, header_style="bold cyan")
@@ -276,10 +381,15 @@ def _print_summary(report) -> None:
 
     # Test script summary
     ts = report.test_script
+    retry_info = f" | 沙盒重试: {ts.retry_count} 次" if ts.retry_count else ""
+    passed = len([r for r in ts.sandbox_results if r.get("success")]) if ts.sandbox_results else "?"
+    total = len(ts.sandbox_results) if ts.sandbox_results else "?"
+    sandbox_info = f" | 沙盒: {passed}/{total}" if ts.sandbox_results else ""
     table.add_row(
-        "🧪 测试脚本",
+        "测试脚本",
         f"脚本文件: {len(ts.scripts)} 个 | "
-        f"依赖包: {len(ts.dependencies)} 个",
+        f"依赖包: {len(ts.dependencies)} 个"
+        + retry_info + sandbox_info,
     )
 
     # Security review summary

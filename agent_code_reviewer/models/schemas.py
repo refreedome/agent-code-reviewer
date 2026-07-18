@@ -70,10 +70,14 @@ class TestScript:
     scripts: list = field(default_factory=list)
     dependencies: list = field(default_factory=list)
     notes: str = ""
+    retry_count: int = 0
+    sandbox_results: list = field(default_factory=list)
 
     def to_markdown(self) -> str:
         """Convert to markdown representation."""
         lines = ["## 测试用例与脚本\n"]
+        if self.retry_count:
+            lines.append(f"> 经过 {self.retry_count} 轮沙盒验证修复\n\n")
         if self.strategy:
             lines.append(f"### 测试策略\n{self.strategy}\n")
         if self.scripts:
@@ -184,6 +188,7 @@ class ReviewReport:
                 "scripts": self.test_script.scripts,
                 "dependencies": self.test_script.dependencies,
                 "notes": self.test_script.notes,
+                "retry_count": self.test_script.retry_count,
             },
             "security_review": {
                 "high_risks": self.security_review.high_risks,

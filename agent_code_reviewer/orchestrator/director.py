@@ -1,5 +1,6 @@
 """Director - orchestrates the multi-agent pipeline."""
 import logging
+import textwrap
 from typing import Optional, Callable
 from agent_code_reviewer.config import Config
 from agent_code_reviewer.llm.qwen import QwenLLM
@@ -8,11 +9,15 @@ from agent_code_reviewer.agents.code_reader import CodeReader
 from agent_code_reviewer.agents.tester import Tester
 from agent_code_reviewer.agents.reviewer import Reviewer
 from agent_code_reviewer.integrations.github import GitHubLoader
+from agent_code_reviewer.sandbox.runner import SandboxRunner
 from agent_code_reviewer.models.schemas import (
     ReviewReport, TestRequirement, CodeContext, TestScript, SecurityReview,
 )
 
 logger = logging.getLogger(__name__)
+
+
+MAX_RETRIES = 4
 
 
 class Director:
@@ -126,24 +131,103 @@ class Director:
                     logic_summary="代码自动分析失败，请手动审查代码。"
                 )
 
-            # Stage 3: Test Generation
-            notify("testing", "🧪 测试工程师正在生成测试脚本...")
-            try:
-                test_data = self.tester.execute({
-                    "requirement": requirement_data,
-                    "code_context": code_data if not code_data.get("parse_error") else {},
-                })
-                report.test_script = self._build_test_script(test_data)
-                notify("testing", "测试脚本生成完成")
-            except Exception as e:
-                logger.error(f"Test generation failed: {e}")
-                notify("testing", f"测试脚本生成出现异常: {e}")
+            # Stage 3: Test Generation with Sandbox Loop (闭环验证)
+            notify("testing", "测试工程师正在生成测试脚本...")
+            sandbox = SandboxRunner(timeout=30)
+
+            test_req_context = requirement_data
+            test_code_context = code_data if not code_data.get("parse_error") else {}
+
+            retry_count = 0
+            sandbox_results = []
+            final_test_data = None
+            last_errors = ""
+
+            while retry_count <= MAX_RETRIES:
+                if retry_count > 0:
+                    notify("testing", f"第 {retry_count}/{MAX_RETRIES} 次重试修复...")
+
+                try:
+                    input_data = {
+                        "requirement": test_req_context,
+                        "code_context": test_code_context,
+                    }
+                    if last_errors:
+                        input_data["syntax_feedback"] = last_errors
+
+                    test_data = self.tester.execute(input_data)
+                    final_test_data = test_data
+
+                    scripts = test_data.get("scripts", [])
+                    if not scripts:
+                        notify("testing", "未生成测试脚本，跳过沙盒验证")
+                        break
+
+                    # Syntax check first (fast path)
+                    all_syntax_ok = True
+                    for s in scripts:
+                        errs = sandbox.extract_syntax_errors(s.get("code", ""))
+                        if errs:
+                            all_syntax_ok = False
+                            last_errors = "\n".join(errs)
+                            notify("testing", f"发现语法错误: {s.get('filename', '')}")
+                            break
+
+                    if not all_syntax_ok:
+                        retry_count += 1
+                        continue
+
+                    # Run sandbox on all scripts
+                    results = sandbox.run_all_scripts(scripts)
+                    sandbox_results = results
+
+                    all_passed = all(r.get("success") for r in results)
+                    if all_passed:
+                        notify("testing", f"沙盒验证通过（{len(scripts)} 个脚本）")
+                        break
+                    else:
+                        # Collect error info for retry
+                        failed = [r for r in results if not r.get("success")]
+                        error_details = []
+                        for f in failed:
+                            fname = f.get("filename", "unknown")
+                            err = (f.get("errors") or f.get("output") or "未知错误")[:500]
+                            error_details.append(f"### {fname} 执行失败\n{err}")
+                        last_errors = "\n\n".join(error_details)
+                        notify("testing", f"沙盒验证未通过（{len(failed)} 个脚本失败），准备重试")
+                        retry_count += 1
+
+                except Exception as e:
+                    logger.error(f"Test generation failed: {e}")
+                    notify("testing", f"测试生成异常: {e}")
+                    retry_count += 1
+                    last_errors = str(e)
+
+            # Build TestScript with sandbox metadata
+            if final_test_data:
+                report.test_script = self._build_test_script(final_test_data)
+                report.test_script.sandbox_results = sandbox_results
+                report.test_script.retry_count = retry_count
+                if retry_count > 0:
+                    report.test_script.notes = (
+                        f"经过 {retry_count} 轮沙盒验证修复后生成的测试脚本。"
+                        + (f"最终版本仍有 {len([r for r in sandbox_results if not r.get('success')])} 个脚本未通过沙盒。"
+                           if sandbox_results and not all(r.get("success") for r in sandbox_results)
+                           else "")
+                    )
+            else:
                 report.test_script = TestScript(
-                    strategy="自动测试生成失败，建议手动编写测试用例。"
+                    strategy="自动测试生成失败，建议手动编写测试用例。",
+                    retry_count=retry_count,
                 )
 
+            notify("testing_result",
+                   f"测试脚本生成完成（重试 {retry_count} 次，"
+                   f"{len([r for r in sandbox_results if r.get('success')]) if sandbox_results else 0}/"
+                   f"{len(sandbox_results) if sandbox_results else 0} 脚本通过沙盒）")
+
             # Stage 4: Security Review
-            notify("review", "🛡️ 安全审查员正在进行安全与架构审查...")
+            notify("review", "安全审查员正在进行安全与架构审查...")
             try:
                 review_data = self.reviewer.execute({
                     "code_context": code_data if not code_data.get("parse_error") else {},
